@@ -56,6 +56,10 @@ function lvfx_view:setDepthTest(test, write)
 	self._depth_write = (write == nil) and true or write
 end
 
+function lvfx_view:setCulling(face)
+	self._culling = face or false
+end
+
 function lvfx_view:getWidth()
 	return self._canvas and self._canvas:getWidth() or love.graphics.getWidth()
 end
@@ -76,6 +80,7 @@ function lvfx.newView()
 		_depth_test  = false,
 		_depth_write = true,
 		_depth_clear = false,
+		_culling     = false,
 		_draws   = {}
 	}
 	return setmetatable(t, lvfx_view_mt)
@@ -86,7 +91,13 @@ local lvfx_shader_mt = {
 	__index = lvfx_shader
 }
 
-function lvfx.newShader(vertex, fragment)
+function lvfx.newShader(vertex, fragment, raw)
+	if l3d and raw then
+		local t = {
+			_handle = l3d.new_shader_raw("2.1", vertex, fragment)
+		}
+		return setmetatable(t, lvfx_shader_mt)
+	end
 	local t = {
 		_handle = love.graphics.newShader(vertex, fragment)
 	}
@@ -115,10 +126,11 @@ function lvfx_uniform:set(...)
 	uniforms[self._name] = #uniforms
 end
 
-function lvfx.newUniform(name, default)
+function lvfx.newUniform(name, int)
 	local t = {
 		_name = assert(name, "Uniform name is required"),
-		_data = default or false
+		_data = false,
+		_int  = int or false
 	}
 	return setmetatable(t, lvfx_uniform_mt)
 end
@@ -232,7 +244,12 @@ function lvfx.frame(views)
 	lg.setColor(fix_love10_colors { 1, 1, 1, 1 })
 	for _, view in ipairs(views) do
 		assert(getmetatable(view) == lvfx_view_mt)
-		lg.setCanvas(view._canvas or nil)
+		local use_shadow_map = l3d and view._canvas and view._canvas.shadow_map
+		if use_shadow_map then
+			l3d.bind_shadow_map(view._canvas)
+		else
+			lg.setCanvas(view._canvas or nil)
+		end
 		-- skip views with no draws
 		if #view._draws == 0 then
 			goto continue
@@ -247,9 +264,16 @@ function lvfx.frame(views)
 			lg.clear(fix_love10_colors(view._clear))
 		end
 		if l3d then
+			l3d.set_culling(view._culling)
 			l3d.set_depth_write(view._depth_write)
 			l3d.set_depth_test(view._depth_test)
 			l3d.clear(false, view._depth_clear)
+			-- alpha blending and depth buffers don't play nice.
+			if view._depth_write and view._depth_test then
+				love.graphics.setBlendMode("alpha", "premultiplied")
+			else
+				love.graphics.setBlendMode("alpha")
+			end
 		end
 		for _, draw in ipairs(view._draws) do
 			lg.push("all")
@@ -260,7 +284,13 @@ function lvfx.frame(views)
 			if draw.shader then
 				for _, uniform in ipairs(draw.uniforms) do
 					local shader = draw.shader._handle
-					shader:send(uniform._name, unpack(uniform._data))
+					if type(uniform._data[1]) == "table" and uniform._data[1].shadow_map then
+						l3d.bind_shadow_texture(uniform._data[1], draw.shader, uniform._name)
+					elseif uniform._int then
+						shader:sendInt(uniform._name, unpack(uniform._data))
+					else
+						shader:send(uniform._name, unpack(uniform._data))
+					end
 				end
 			end
 			if draw.fn then
@@ -268,14 +298,19 @@ function lvfx.frame(views)
 			elseif draw.mesh then
 				lg.draw(draw.mesh, unpack(draw.mesh_params or {}))
 			end
+			if use_shadow_map then
+				l3d.bind_shadow_map()
+			end
 			lg.pop()
 		end
 		tclear(view._draws)
 		::continue::
 	end
+	love.graphics.setBlendMode("alpha")
 	lg.setCanvas()
 	lg.setScissor()
 	if l3d then
+		l3d.set_culling()
 		l3d.set_depth_write()
 		l3d.set_depth_test()
 	end
